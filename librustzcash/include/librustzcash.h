@@ -100,7 +100,10 @@ extern "C" {
         const unsigned char *witness,
         unsigned char *cv,
         unsigned char *rk,
-        unsigned char *zkproof
+        unsigned char *zkproof,
+        const codeunit* spend_path,
+        size_t spend_path_len,
+        const char* spend_hash
     );
 
     /// This function (using the proving context) constructs an Output
@@ -114,7 +117,10 @@ extern "C" {
         const unsigned char *rcm,
         const uint64_t value,
         unsigned char *cv,
-        unsigned char *zkproof
+        unsigned char *zkproof,
+        const codeunit* output_path,
+        size_t output_path_len,
+        const char* output_hash
     );
 
     /// This function (using the proving context) constructs a binding
@@ -145,7 +151,10 @@ extern "C" {
         const unsigned char *rk,
         const unsigned char *zkproof,
         const unsigned char *spendAuthSig,
-        const unsigned char *sighashValue
+        const unsigned char *sighashValue,
+        const codeunit* spend_path,
+        size_t spend_path_len,
+        const char* spend_hash
     );
 
     /// Check the validity of a Sapling Output description,
@@ -155,7 +164,10 @@ extern "C" {
         const unsigned char *cv,
         const unsigned char *cm,
         const unsigned char *ephemeralKey,
-        const unsigned char *zkproof
+        const unsigned char *zkproof,
+        const codeunit* output_path,
+        size_t output_path_len,
+        const char* output_hash
     );
 
     /// Finally checks the validity of the entire Sapling
@@ -176,7 +188,10 @@ extern "C" {
             const unsigned char *rk,
             const unsigned char *zkproof,
             const unsigned char *spendAuthSig,
-            const unsigned char *sighashValue
+            const unsigned char *sighashValue,
+            const codeunit* spend_path,
+            size_t spend_path_len,
+            const char* spend_hash
     );
 
     /// Check the validity of a Sapling Output description,
@@ -185,7 +200,10 @@ extern "C" {
             const unsigned char *cv,
             const unsigned char *cm,
             const unsigned char *ephemeralKey,
-            const unsigned char *zkproof
+            const unsigned char *zkproof,
+            const codeunit* output_path,
+            size_t output_path_len,
+            const char* output_hash
     );
 
     /// Finally checks the validity of the entire Sapling

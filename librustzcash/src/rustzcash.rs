@@ -141,12 +141,8 @@ pub extern "system" fn librustzcash_init_zksnark_params(
     let output_path = Path::new(OsStr::from_bytes(unsafe {
         slice::from_raw_parts(output_path, output_path_len)
     }));
-    init_zksnark_params(
-        spend_path,
-        spend_hash,
-        output_path,
-        output_hash
-    )
+    init_spend_params(spend_path, spend_hash);
+    init_output_params(output_path, output_hash);
 }
 
 #[cfg(target_os = "windows")]
@@ -169,74 +165,9 @@ pub extern "system" fn librustzcash_init_zksnark_params(
         spend_hash,
         Path::new(&output_path),
         output_hash
-    )
-}
-
-fn init_zksnark_params(
-    spend_path: &Path,
-    spend_hash: *const c_char,
-    output_path: &Path,
-    output_hash: *const c_char
-) {
-    // Initialize jubjub parameters here
-    lazy_static::initialize(&JUBJUB);
-
-    let spend_hash = unsafe { CStr::from_ptr(spend_hash) }
-        .to_str()
-        .expect("hash should be a valid string")
-        .to_string();
-
-    let output_hash = unsafe { CStr::from_ptr(output_hash) }
-        .to_str()
-        .expect("hash should be a valid string")
-        .to_string();
-
-    // Load from each of the paths
-    let spend_fs = File::open(spend_path).expect("couldn't load Sapling spend parameters file");
-    let output_fs = File::open(output_path).expect("couldn't load Sapling output parameters file");
-
-    let mut spend_fs = hashreader::HashReader::new(BufReader::with_capacity(1024 * 1024, spend_fs));
-    let mut output_fs =
-        hashreader::HashReader::new(BufReader::with_capacity(1024 * 1024, output_fs));
-
-    // Deserialize params
-    let spend_params = Parameters::<Bls12>::read(&mut spend_fs, false)
-        .expect("couldn't deserialize Sapling spend parameters file");
-    let output_params = Parameters::<Bls12>::read(&mut output_fs, false)
-        .expect("couldn't deserialize Sapling spend parameters file");
-
-
-    // There is extra stuff (the transcript) at the end of the parameter file which is
-    // used to verify the parameter validity, but we're not interested in that. We do
-    // want to read it, though, so that the BLAKE2b computed afterward is consistent
-    // with `b2sum` on the files.
-    let mut sink = io::sink();
-    io::copy(&mut spend_fs, &mut sink)
-        .expect("couldn't finish reading Sapling spend parameter file");
-    io::copy(&mut output_fs, &mut sink)
-        .expect("couldn't finish reading Sapling output parameter file");
-
-    if spend_fs.into_hash() != spend_hash {
-        panic!("Sapling spend parameter file is not correct, please clean your `~/.zcash-params/` and re-run `fetch-params`.");
-    }
-
-    if output_fs.into_hash() != output_hash {
-        panic!("Sapling output parameter file is not correct, please clean your `~/.zcash-params/` and re-run `fetch-params`.");
-    }
-
-    // Prepare verifying keys
-    let spend_vk = prepare_verifying_key(&spend_params.vk);
-    let output_vk = prepare_verifying_key(&output_params.vk);
-
-    // Caller is responsible for calling this function once, so
-    // these global mutations are safe.
-    unsafe {
-        SAPLING_SPEND_PARAMS = Some(spend_params);
-        SAPLING_OUTPUT_PARAMS = Some(output_params);
-
-        SAPLING_SPEND_VK = Some(spend_vk);
-        SAPLING_OUTPUT_VK = Some(output_vk);
-    }
+    );
+    init_spend_params(Path::new(&spend_path), spend_hash);
+    init_output_params(Path::new(&output_path), output_hash);
 }
 
 #[no_mangle]
@@ -633,6 +564,7 @@ const GROTH_PROOF_SIZE: usize = 48 // π_A
     + 96 // π_B
     + 48; // π_C
 
+#[cfg(not(target_os = "windows"))]
 #[no_mangle]
 pub extern "system" fn librustzcash_sapling_check_spend(
     ctx: *mut SaplingVerificationContext,
@@ -643,6 +575,69 @@ pub extern "system" fn librustzcash_sapling_check_spend(
     zkproof: *const [c_uchar; GROTH_PROOF_SIZE],
     spend_auth_sig: *const [c_uchar; 64],
     sighash_value: *const [c_uchar; 32],
+    spend_path: *const u8,
+    spend_path_len: usize,
+    spend_hash: *const c_char,
+) -> bool {
+    if !check_to_init_spend_params(spend_path, spend_path_len, spend_hash) {
+        return false;
+    }
+
+    librustzcash_sapling_check_spend_inner(
+        ctx,
+        cv,
+        anchor,
+        nullifier,
+        rk,
+        zkproof,
+        spend_auth_sig,
+        sighash_value
+    )
+
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "system" fn librustzcash_sapling_check_spend(
+    ctx: *mut SaplingVerificationContext,
+    cv: *const [c_uchar; 32],
+    anchor: *const [c_uchar; 32],
+    nullifier: *const [c_uchar; 32],
+    rk: *const [c_uchar; 32],
+    zkproof: *const [c_uchar; GROTH_PROOF_SIZE],
+    spend_auth_sig: *const [c_uchar; 64],
+    sighash_value: *const [c_uchar; 32],
+    spend_path: *const u16,
+    spend_path_len: usize,
+    spend_hash: *const c_char,
+) -> bool {
+    if !check_to_init_spend_params(spend_path, spend_path_len, spend_hash) {
+        return false;
+    }
+
+    librustzcash_sapling_check_spend_inner(
+        ctx,
+        cv,
+        anchor,
+        nullifier,
+        rk,
+        zkproof,
+        spend_auth_sig,
+        sighash_value
+    )
+}
+
+
+
+fn librustzcash_sapling_check_spend_inner(
+    ctx: *mut SaplingVerificationContext,
+    cv: *const [c_uchar; 32],
+    anchor: *const [c_uchar; 32],
+    nullifier: *const [c_uchar; 32],
+    rk: *const [c_uchar; 32],
+    zkproof: *const [c_uchar; GROTH_PROOF_SIZE],
+    spend_auth_sig: *const [c_uchar; 64],
+    sighash_value: *const [c_uchar; 32]
 ) -> bool {
     // Deserialize the value commitment
     let cv = match edwards::Point::<Bls12, Unknown>::read(&(unsafe { &*cv })[..], &JUBJUB) {
@@ -749,6 +744,7 @@ pub extern "system" fn librustzcash_sapling_check_spend(
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 #[no_mangle]
 pub extern "system" fn librustzcash_sapling_check_spend_new(
     cv: *const [c_uchar; 32],
@@ -758,6 +754,63 @@ pub extern "system" fn librustzcash_sapling_check_spend_new(
     zkproof: *const [c_uchar; GROTH_PROOF_SIZE],
     spend_auth_sig: *const [c_uchar; 64],
     sighash_value: *const [c_uchar; 32],
+    spend_path: *const u8,
+    spend_path_len: usize,
+    spend_hash: *const c_char
+) -> bool {
+    if !check_to_init_spend_params(spend_path, spend_path_len, spend_hash) {
+        return false;
+    }
+
+    librustzcash_sapling_check_spend_new_inner(
+        cv,
+        anchor,
+        nullifier,
+        rk,
+        zkproof,
+        spend_auth_sig,
+        sighash_value
+    )
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "system" fn librustzcash_sapling_check_spend_new(
+    cv: *const [c_uchar; 32],
+    anchor: *const [c_uchar; 32],
+    nullifier: *const [c_uchar; 32],
+    rk: *const [c_uchar; 32],
+    zkproof: *const [c_uchar; GROTH_PROOF_SIZE],
+    spend_auth_sig: *const [c_uchar; 64],
+    sighash_value: *const [c_uchar; 32],
+    spend_path: *const u16,
+    spend_path_len: usize,
+    spend_hash: *const c_char
+) -> bool {
+    if !check_to_init_spend_params(spend_path, spend_path_len, spend_hash) {
+        return false;
+    }
+
+    librustzcash_sapling_check_spend_new_inner(
+        cv,
+        anchor,
+        nullifier,
+        rk,
+        zkproof,
+        spend_auth_sig,
+        sighash_value
+    )
+}
+
+
+fn librustzcash_sapling_check_spend_new_inner(
+    cv: *const [c_uchar; 32],
+    anchor: *const [c_uchar; 32],
+    nullifier: *const [c_uchar; 32],
+    rk: *const [c_uchar; 32],
+    zkproof: *const [c_uchar; GROTH_PROOF_SIZE],
+    spend_auth_sig: *const [c_uchar; 64],
+    sighash_value: *const [c_uchar; 32]
 ) -> bool {
     // Deserialize the value commitment
     let cv = match edwards::Point::<Bls12, Unknown>::read(&(unsafe { &*cv })[..], &JUBJUB) {
@@ -855,8 +908,58 @@ pub extern "system" fn librustzcash_sapling_check_spend_new(
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 #[no_mangle]
 pub extern "system" fn librustzcash_sapling_check_output(
+    ctx: *mut SaplingVerificationContext,
+    cv: *const [c_uchar; 32],
+    cm: *const [c_uchar; 32],
+    epk: *const [c_uchar; 32],
+    zkproof: *const [c_uchar; GROTH_PROOF_SIZE],
+    output_path: *const u8,
+    output_path_len: usize,
+    output_hash: *const c_char
+) -> bool {
+    if !check_to_init_output_params(output_path, output_path_len, output_hash) {
+        return false;
+    }
+
+    librustzcash_sapling_check_output_inner(
+        ctx,
+        cv,
+        cm,
+        epk,
+        zkproof,
+    )
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "system" fn librustzcash_sapling_check_output(
+    ctx: *mut SaplingVerificationContext,
+    cv: *const [c_uchar; 32],
+    cm: *const [c_uchar; 32],
+    epk: *const [c_uchar; 32],
+    zkproof: *const [c_uchar; GROTH_PROOF_SIZE],
+    output_path: *const u16,
+    output_path_len: usize,
+    output_hash: *const c_char
+) -> bool {
+    if !check_to_init_output_params(output_path, output_path_len, output_hash) {
+        return false;
+    }
+
+    librustzcash_sapling_check_output_inner(
+        ctx,
+        cv,
+        cm,
+        epk,
+        zkproof,
+    )
+}
+
+
+fn librustzcash_sapling_check_output_inner(
     ctx: *mut SaplingVerificationContext,
     cv: *const [c_uchar; 32],
     cm: *const [c_uchar; 32],
@@ -934,8 +1037,54 @@ pub extern "system" fn librustzcash_sapling_check_output(
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 #[no_mangle]
 pub extern "system" fn librustzcash_sapling_check_output_new(
+    cv: *const [c_uchar; 32],
+    cm: *const [c_uchar; 32],
+    epk: *const [c_uchar; 32],
+    zkproof: *const [c_uchar; GROTH_PROOF_SIZE],
+    output_path: *const u8,
+    output_path_len: usize,
+    output_hash: *const c_char
+) -> bool {
+    if !check_to_init_output_params(output_path, output_path_len, output_hash) {
+        return false;
+    }
+
+    librustzcash_sapling_check_output_new_inner(
+        cv,
+        cm,
+        epk,
+        zkproof,
+    )
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "system" fn librustzcash_sapling_check_output_new(
+    cv: *const [c_uchar; 32],
+    cm: *const [c_uchar; 32],
+    epk: *const [c_uchar; 32],
+    zkproof: *const [c_uchar; GROTH_PROOF_SIZE],
+    output_path: *const u16,
+    output_path_len: usize,
+    output_hash: *const c_char
+) -> bool {
+    if !check_to_init_output_params(output_path, output_path_len, output_hash) {
+        return false;
+    }
+
+    librustzcash_sapling_check_output_new_inner(
+        cv,
+        cm,
+        epk,
+        zkproof,
+    )
+}
+
+
+fn librustzcash_sapling_check_output_new_inner(
     cv: *const [c_uchar; 32],
     cm: *const [c_uchar; 32],
     epk: *const [c_uchar; 32],
@@ -1354,6 +1503,26 @@ pub struct SaplingProvingContext {
     bvk: edwards::Point<Bls12, Unknown>,
 }
 
+#[cfg(not(target_os = "windows"))]
+fn check_to_init_output_params(
+    output_path: *const u8,
+    output_path_len: usize,
+    output_hash: *const c_char
+) -> bool {
+    unsafe {
+        if SAPLING_OUTPUT_PARAMS.is_none()  {
+            let output_path = Path::new(OsStr::from_bytes(unsafe {
+                slice::from_raw_parts(output_path, output_path_len)}));
+            init_output_params(output_path, output_hash);
+            if SAPLING_OUTPUT_PARAMS.is_none() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
 #[no_mangle]
 pub extern "system" fn librustzcash_sapling_output_proof(
     ctx: *mut SaplingProvingContext,
@@ -1364,6 +1533,85 @@ pub extern "system" fn librustzcash_sapling_output_proof(
     value: uint64_t,
     cv: *mut [c_uchar; 32],
     zkproof: *mut [c_uchar; GROTH_PROOF_SIZE],
+    output_path: *const u8,
+    output_path_len: usize,
+    output_hash: *const c_char
+) -> bool {
+    if !check_to_init_output_params(output_path, output_path_len, output_hash) {
+        return false;
+    }
+
+    librustzcash_sapling_output_proof_inner(
+        ctx,
+        esk,
+        diversifier,
+        pk_d,
+        rcm,
+        value,
+        cv,
+        zkproof
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn check_to_init_output_params(
+    output_path: *const u16,
+    output_path_len: usize,
+    output_hash: *const c_char
+) -> bool {
+    unsafe {
+        if SAPLING_OUTPUT_PARAMS.is_none()  {
+            let output_path =
+                OsString::from_wide(unsafe { slice::from_raw_parts(output_path, output_path_len) });
+            init_output_params(output_path, output_hash);
+            if SAPLING_OUTPUT_PARAMS.is_none() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "system" fn librustzcash_sapling_output_proof(
+    ctx: *mut SaplingProvingContext,
+    esk: *const [c_uchar; 32],
+    diversifier: *const [c_uchar; 11],
+    pk_d: *const [c_uchar; 32],
+    rcm: *const [c_uchar; 32],
+    value: uint64_t,
+    cv: *mut [c_uchar; 32],
+    zkproof: *mut [c_uchar; GROTH_PROOF_SIZE],
+    output_path: *const u16,
+    output_path_len: usize,
+    output_hash: *const c_char
+) -> bool {
+    if !check_to_init_output_params(output_path, output_path_len, output_hash) {
+        return false;
+    }
+
+    librustzcash_sapling_output_proof_inner(
+        ctx,
+        esk,
+        diversifier,
+        pk_d,
+        rcm,
+        value,
+        cv,
+        zkproof
+    )
+}
+
+fn librustzcash_sapling_output_proof_inner(
+    ctx: *mut SaplingProvingContext,
+    esk: *const [c_uchar; 32],
+    diversifier: *const [c_uchar; 11],
+    pk_d: *const [c_uchar; 32],
+    rcm: *const [c_uchar; 32],
+    value: uint64_t,
+    cv: *mut [c_uchar; 32],
+    zkproof: *mut [c_uchar; GROTH_PROOF_SIZE]
 ) -> bool {
     // Grab `esk`, which the caller should have constructed for the DH key exchange.
     let esk = match Fs::from_repr(read_fs(&(unsafe { &*esk })[..])) {
@@ -1431,15 +1679,10 @@ pub extern "system" fn librustzcash_sapling_output_proof(
         esk: Some(esk.clone()),
     };
 
-    let mut params = match unsafe { SAPLING_OUTPUT_PARAMS.as_ref() } {
-        Some(T) => T,
-        None => return false,
-    };
-
     // Create proof
     let proof = create_random_proof(
         instance,
-        params,
+        unsafe { SAPLING_OUTPUT_PARAMS.as_ref() }.unwrap(),
         &mut rng,
     ).expect("proving should not fail");
 
@@ -1468,6 +1711,51 @@ pub extern "system" fn librustzcash_sapling_output_proof(
 
     true
 }
+
+fn init_output_params(
+    output_path: &Path,
+    output_hash: *const c_char
+) {
+    // Initialize jubjub parameters here
+    lazy_static::initialize(&JUBJUB);
+
+    let output_hash = unsafe { CStr::from_ptr(output_hash) }
+        .to_str()
+        .expect("hash should be a valid string")
+        .to_string();
+
+    // Load from each of the paths
+    let output_fs = File::open(output_path).expect("couldn't load Sapling output parameters file");
+
+    let mut output_fs =
+        hashreader::HashReader::new(BufReader::with_capacity(1024 * 1024, output_fs));
+
+    let output_params = Parameters::<Bls12>::read(&mut output_fs, false)
+        .expect("couldn't deserialize Sapling spend parameters file");
+
+    // There is extra stuff (the transcript) at the end of the parameter file which is
+    // used to verify the parameter validity, but we're not interested in that. We do
+    // want to read it, though, so that the BLAKE2b computed afterward is consistent
+    // with `b2sum` on the files.
+    let mut sink = io::sink();
+    io::copy(&mut output_fs, &mut sink)
+        .expect("couldn't finish reading Sapling output parameter file");
+
+    if output_fs.into_hash() != output_hash {
+        panic!("Sapling output parameter file is not correct, please clean your `~/.zcash-params/` and re-run `fetch-params`.");
+    }
+
+    // Prepare verifying keys
+    let output_vk = prepare_verifying_key(&output_params.vk);
+
+    // Caller is responsible for calling this function once, so
+    // these global mutations are safe.
+    unsafe {
+        SAPLING_OUTPUT_PARAMS = Some(output_params);
+        SAPLING_OUTPUT_VK = Some(output_vk);
+    }
+}
+
 
 #[no_mangle]
 pub extern "system" fn librustzcash_sapling_spend_sig(
@@ -1579,6 +1867,26 @@ pub extern "system" fn librustzcash_sapling_binding_sig(
     true
 }
 
+#[cfg(not(target_os = "windows"))]
+fn check_to_init_spend_params(
+    spend_path: *const u8,
+    spend_path_len: usize,
+    spend_hash: *const c_char
+) -> bool {
+    unsafe {
+        if SAPLING_SPEND_PARAMS.is_none()  {
+            let spend_path = Path::new(OsStr::from_bytes(unsafe {
+                slice::from_raw_parts(spend_path, spend_path_len)}));
+            init_spend_params(spend_path, spend_hash);
+            if SAPLING_OUTPUT_PARAMS.is_none() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
 #[no_mangle]
 pub extern "system" fn librustzcash_sapling_spend_proof(
     ctx: *mut SaplingProvingContext,
@@ -1593,6 +1901,100 @@ pub extern "system" fn librustzcash_sapling_spend_proof(
     cv: *mut [c_uchar; 32],
     rk_out: *mut [c_uchar; 32],
     zkproof: *mut [c_uchar; GROTH_PROOF_SIZE],
+    spend_path: *const u8,
+    spend_path_len: usize,
+    spend_hash: *const c_char
+) -> bool {
+    if !check_to_init_spend_params(spend_path, spend_path_len, spend_hash) {
+        return false;
+    }
+    librustzcash_sapling_spend_proof_inner(
+        ctx,
+        ak,
+        nsk,
+        diversifier,
+        rcm,
+        ar,
+        value,
+        anchor,
+        witness,
+        cv,
+        rk_out,
+        zkproof
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn check_to_init_spend_params(
+    spend_path: *const u16,
+    spend_path_len: usize,
+    spend_hash: *const c_char
+) -> bool {
+    unsafe {
+        if SAPLING_SPEND_PARAMS.is_none()  {
+            let spend_path =
+                OsString::from_wide(unsafe { slice::from_raw_parts(spend_path, spend_path_len) });
+            init_spend_params(Path::new(&spend_path), spend_hash);
+            if SAPLING_OUTPUT_PARAMS.is_none() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub extern "system" fn librustzcash_sapling_spend_proof(
+    ctx: *mut SaplingProvingContext,
+    ak: *const [c_uchar; 32],
+    nsk: *const [c_uchar; 32],
+    diversifier: *const [c_uchar; 11],
+    rcm: *const [c_uchar; 32],
+    ar: *const [c_uchar; 32],
+    value: uint64_t,
+    anchor: *const [c_uchar; 32],
+    witness: *const [c_uchar; 1 + 33 * SAPLING_TREE_DEPTH + 8],
+    cv: *mut [c_uchar; 32],
+    rk_out: *mut [c_uchar; 32],
+    zkproof: *mut [c_uchar; GROTH_PROOF_SIZE],
+    spend_path: *const u16,
+    spend_path_len: usize,
+    spend_hash: *const c_char
+) -> bool {
+    if !check_to_init_spend_params(spend_path, spend_path_len, spend_hash) {
+        return false;
+    }
+
+    librustzcash_sapling_spend_proof_inner(
+        ctx,
+        ak,
+        nsk,
+        diversifier,
+        rcm,
+        ar,
+        value,
+        anchor,
+        witness,
+        cv,
+        rk_out,
+        zkproof
+    )
+}
+
+fn librustzcash_sapling_spend_proof_inner(
+    ctx: *mut SaplingProvingContext,
+    ak: *const [c_uchar; 32],
+    nsk: *const [c_uchar; 32],
+    diversifier: *const [c_uchar; 11],
+    rcm: *const [c_uchar; 32],
+    ar: *const [c_uchar; 32],
+    value: uint64_t,
+    anchor: *const [c_uchar; 32],
+    witness: *const [c_uchar; 1 + 33 * SAPLING_TREE_DEPTH + 8],
+    cv: *mut [c_uchar; 32],
+    rk_out: *mut [c_uchar; 32],
+    zkproof: *mut [c_uchar; GROTH_PROOF_SIZE]
 ) -> bool {
 
     let mut rng = OsRng::new().expect("should be able to construct RNG");
@@ -1828,6 +2230,50 @@ pub extern "system" fn librustzcash_sapling_spend_proof(
         .expect("should be able to serialize a proof");
 
     true
+}
+
+fn init_spend_params(
+    spend_path: &Path,
+    spend_hash: *const c_char
+) {
+    // Initialize jubjub parameters here
+    lazy_static::initialize(&JUBJUB);
+
+    let spend_hash = unsafe { CStr::from_ptr(spend_hash) }
+        .to_str()
+        .expect("hash should be a valid string")
+        .to_string();
+
+    // Load from each of the paths
+    let spend_fs = File::open(spend_path).expect("couldn't load Sapling spend parameters file");
+
+    let mut spend_fs = hashreader::HashReader::new(BufReader::with_capacity(1024 * 1024, spend_fs));
+
+    // Deserialize params
+    let spend_params = Parameters::<Bls12>::read(&mut spend_fs, false)
+        .expect("couldn't deserialize Sapling spend parameters file");
+
+    // There is extra stuff (the transcript) at the end of the parameter file which is
+    // used to verify the parameter validity, but we're not interested in that. We do
+    // want to read it, though, so that the BLAKE2b computed afterward is consistent
+    // with `b2sum` on the files.
+    let mut sink = io::sink();
+    io::copy(&mut spend_fs, &mut sink)
+        .expect("couldn't finish reading Sapling spend parameter file");
+
+    if spend_fs.into_hash() != spend_hash {
+        panic!("Sapling spend parameter file is not correct, please clean your `~/.zcash-params/` and re-run `fetch-params`.");
+    }
+
+    // Prepare verifying keys
+    let spend_vk = prepare_verifying_key(&spend_params.vk);
+
+    // Caller is responsible for calling this function once, so
+    // these global mutations are safe.
+    unsafe {
+        SAPLING_SPEND_PARAMS = Some(spend_params);
+        SAPLING_SPEND_VK = Some(spend_vk);
+    }
 }
 
 #[no_mangle]
